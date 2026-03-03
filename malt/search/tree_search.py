@@ -148,6 +148,8 @@ def run_tree_search_for_questions(
 
     for ex in questions:
         # 1) Generator stage
+        print(f"Processing question {ex.id + 1}/{len(questions)}")
+
         set_active_role_adapter(model, ROLE_GENERATOR)
         gen_prompts = [build_generator_prompt(ex.question) for _ in range(n)]
         gen_texts = _sample_texts(
@@ -240,10 +242,13 @@ def run_tree_search_for_gsm8k_split(
 
     # Ensure output directory exists.
     cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
+    print('output paaaaath exists/created')
 
     # Load data and model.
     examples = load_gsm8k_split(split)
+    print("looooooaded ggggggggggsm8k   split")
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
+    print("loaded llama with adapters")
 
     with cfg.output_path.open("w", encoding="utf-8") as f:
         for traj in run_tree_search_for_questions(

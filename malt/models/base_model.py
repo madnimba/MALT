@@ -98,6 +98,7 @@ def load_malt_llama_with_adapters(
         quantization_config=quant_config,
         torch_dtype=cfg.torch_dtype if quant_config is None else None,
     )
+    print("loaded llama")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, use_fast=True)
     if tokenizer.pad_token is None:
@@ -114,6 +115,7 @@ def load_malt_llama_with_adapters(
         task_type="CAUSAL_LM",
         target_modules=list(cfg.target_modules),
     )
+    print("lora coooonfig crrrrrrrrrreated")
 
     # Wrap the model in PEFT and register three role-specific adapters.
     peft_model = get_peft_model(model, lora_config, adapter_name=ROLE_GENERATOR)
@@ -123,6 +125,8 @@ def load_malt_llama_with_adapters(
 
     # Default to generator role.
     peft_model.set_adapter(ROLE_GENERATOR)
+
+    print("added roleeee adapters")
 
     return peft_model, tokenizer
 
@@ -161,12 +165,16 @@ def load_malt_llama_with_trained_adapters(
     model, tokenizer = load_malt_llama_with_adapters(cfg)
 
     # Normalize to strings for peft.load_adapter
-    if generator_checkpoint is not None:
-        model.load_adapter(str(generator_checkpoint), adapter_name=ROLE_GENERATOR)
     if verifier_checkpoint is not None:
-        model.load_adapter(str(verifier_checkpoint), adapter_name=ROLE_VERIFIER)
+        ckpt = Path(verifier_checkpoint)
+        model.load_adapter(str((ckpt / ROLE_VERIFIER).resolve()), adapter_name=ROLE_VERIFIER)
+    if generator_checkpoint is not None:
+        ckpt = Path(generator_checkpoint)
+        model.load_adapter(str((ckpt / ROLE_GENERATOR).resolve()), adapter_name=ROLE_GENERATOR)
+
     if refiner_checkpoint is not None:
-        model.load_adapter(str(refiner_checkpoint), adapter_name=ROLE_REFINER)
+        ckpt = Path(refiner_checkpoint)
+        model.load_adapter(str((ckpt / ROLE_REFINER).resolve()), adapter_name=ROLE_REFINER)
 
     # Default active adapter: generator
     model.set_adapter(ROLE_GENERATOR)

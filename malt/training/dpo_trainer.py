@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import List, Sequence, Tuple
 
 from torch.utils.data import Dataset
+from datasets import Dataset as HFDataset
 from transformers import TrainingArguments, PreTrainedTokenizerBase
-from trl import DPOTrainer
+from trl import DPOTrainer, DPOConfig
+from malt.models import load_malt_llama_with_trained_adapters
 
 from malt.data.preference_builders import (
     VerifierDpoSample,
@@ -52,8 +54,8 @@ class DpoTrainingConfig:
     save_steps: int = 500
     save_total_limit: int = 2
 
-    bf16: bool = False
-    fp16: bool = True
+    bf16: bool = True
+    fp16: bool = False
 
 
 class DpoTextPairDataset(Dataset):
@@ -106,7 +108,7 @@ def _build_verifier_dpo_text_triples_from_trajectories(
     triples: List[Tuple[str, str, str]] = []
     for s in samples:
         prompt = build_verifier_prompt(s.question, s.generator_output)
-        triples.append((prompt, s.chosen, s.rejected))
+        triples.append((prompt.rstrip() + "\n\n", s.chosen.lstrip(), s.rejected.lstrip()))
     return triples
 
 
@@ -134,7 +136,7 @@ def _build_refiner_dpo_text_triples_from_trajectories(
             s.generator_output,
             s.verifier_output,
         )
-        triples.append((prompt, s.chosen, s.rejected))
+        triples.append((prompt + "\n\n", s.chosen.lstrip(), s.rejected.lstrip()))
     return triples
 
 
@@ -142,9 +144,10 @@ def _build_dpo_trainer(
     model,
     ref_model,
     train_dataset: Dataset,
+    tokenizer: PreTrainedTokenizerBase,
     cfg: DpoTrainingConfig,
 ):
-    training_args = TrainingArguments(
+    dpo_args = DPOConfig(
         output_dir=str(cfg.output_dir),
         num_train_epochs=cfg.num_train_epochs,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
@@ -156,17 +159,21 @@ def _build_dpo_trainer(
         bf16=cfg.bf16,
         fp16=cfg.fp16,
         report_to=[],
+        max_length=cfg.max_seq_length,  # TRL field
+        beta=cfg.beta,
+
+        # These exist in your DPOConfig signature; set explicitly for memory
+        gradient_checkpointing=True,
+        use_cache=False,
     )
 
-    dpo_trainer = DPOTrainer(
+    return DPOTrainer(
         model=model,
         ref_model=ref_model,
-        args=training_args,
-        beta=cfg.beta,
+        args=dpo_args,
         train_dataset=train_dataset,
+        processing_class=tokenizer,
     )
-    return dpo_trainer
-
 
 def train_verifier_dpo(
     valued_trajectories_path: Path,
@@ -181,23 +188,39 @@ def train_verifier_dpo(
     the DPOTrainer updates only `model`.
     """
     model_cfg = model_cfg or MaltModelConfig()
-    model, tokenizer = load_malt_llama_with_adapters(model_cfg)
-    set_active_role_adapter(model, ROLE_VERIFIER)
 
-    # Reference model is a frozen copy of the starting SFT weights.
-    ref_model, _ = load_malt_llama_with_adapters(model_cfg)
+    model, tokenizer = load_malt_llama_with_trained_adapters(
+        model_cfg,
+        verifier_checkpoint=Path("checkpoints/verifier_sft"),
+    )
+    set_active_role_adapter(model, ROLE_VERIFIER)
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
+
+    ref_model, _ = load_malt_llama_with_trained_adapters(
+        model_cfg,
+        verifier_checkpoint=Path("checkpoints/verifier_sft"),
+    )
     set_active_role_adapter(ref_model, ROLE_VERIFIER)
+    ref_model.config.use_cache = False
 
     triples = _build_verifier_dpo_text_triples_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
     )
-    dataset = DpoTextPairDataset(triples)
+    dataset = HFDataset.from_dict(
+        {
+            "prompt": [p for p, _, _ in triples],
+            "chosen": [c for _, c, _ in triples],
+            "rejected": [r for _, _, r in triples],
+        }
+    )
 
     dpo_trainer = _build_dpo_trainer(
         model=model,
         ref_model=ref_model,
         train_dataset=dataset,
+        tokenizer=tokenizer,
         cfg=cfg,
     )
     dpo_trainer.train()
@@ -215,22 +238,39 @@ def train_refiner_dpo(
     Train the Refiner adapter with DPO on valued trajectories.
     """
     model_cfg = model_cfg or MaltModelConfig()
-    model, tokenizer = load_malt_llama_with_adapters(model_cfg)
-    set_active_role_adapter(model, ROLE_REFINER)
 
-    ref_model, _ = load_malt_llama_with_adapters(model_cfg)
-    set_active_role_adapter(ref_model, ROLE_REFINER)
+    model, tokenizer = load_malt_llama_with_trained_adapters(
+        model_cfg,
+        verifier_checkpoint=Path("checkpoints/refiner_sft"),
+    )
+    set_active_role_adapter(model, ROLE_VERIFIER)
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
+
+    ref_model, _ = load_malt_llama_with_trained_adapters(
+        model_cfg,
+        verifier_checkpoint=Path("checkpoints/refiner_sft"),
+    )
+    set_active_role_adapter(ref_model, ROLE_VERIFIER)
+    ref_model.config.use_cache = False
 
     triples = _build_refiner_dpo_text_triples_from_trajectories(
         valued_trajectories_path=valued_trajectories_path,
         max_train_samples=cfg.max_train_samples,
     )
-    dataset = DpoTextPairDataset(triples)
+    dataset = HFDataset.from_dict(
+        {
+            "prompt": [p for p, _, _ in triples],
+            "chosen": [c for _, c, _ in triples],
+            "rejected": [r for _, _, r in triples],
+        }
+    )
 
     dpo_trainer = _build_dpo_trainer(
         model=model,
         ref_model=ref_model,
         train_dataset=dataset,
+        tokenizer=tokenizer,
         cfg=cfg,
     )
     dpo_trainer.train()
