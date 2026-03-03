@@ -1,0 +1,9 @@
+transformers
+accelerate
+peft
+bitsandbytes
+datasets
+trl
+sentencepiece
+pyyaml
+tqdm
