@@ -148,7 +148,7 @@ def run_tree_search_for_questions(
 
     for ex in questions:
         # 1) Generator stage
-        print(f"Processing question {ex.id + 1}/{len(questions)}")
+        print(f"Processing question id {ex.id}/{len(questions)}")
 
         set_active_role_adapter(model, ROLE_GENERATOR)
         gen_prompts = [build_generator_prompt(ex.question) for _ in range(n)]
@@ -229,6 +229,30 @@ def run_tree_search_for_questions(
         yield trajectory
 
 
+def _get_last_processed_id(path: Path) -> int | None:
+    """
+    If a trajectory file already exists, read the last line and return
+    the question id that was last processed.
+    """
+    if not path.exists():
+        return None
+
+    last_line = None
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                last_line = line
+
+    if last_line is None:
+        return None
+
+    try:
+        obj = json.loads(last_line)
+        return obj.get("id")
+    except Exception:
+        return None
+    
+
 def run_tree_search_for_gsm8k_split(
     split: Literal["train", "test", "validation"],
     cfg: TreeSearchConfig,
@@ -242,15 +266,23 @@ def run_tree_search_for_gsm8k_split(
 
     # Ensure output directory exists.
     cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
-    print('output paaaaath exists/created')
+    print("output path exists/created")
 
-    # Load data and model.
+    last_id = _get_last_processed_id(cfg.output_path)
+
     examples = load_gsm8k_split(split)
-    print("looooooaded ggggggggggsm8k   split")
+    print("loaded gsm8k split")
+
+    if last_id is not None:
+        print(f"Resuming after id {last_id}")
+        examples = [ex for ex in examples if str(ex.id) > str(last_id)]
+
     model, tokenizer = load_malt_llama_with_adapters(model_cfg)
     print("loaded llama with adapters")
 
-    with cfg.output_path.open("w", encoding="utf-8") as f:
+    mode = "a" if cfg.output_path.exists() else "w"
+
+    with cfg.output_path.open(mode, encoding="utf-8") as f:
         for traj in run_tree_search_for_questions(
             model=model,
             tokenizer=tokenizer,
