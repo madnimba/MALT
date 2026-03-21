@@ -4,6 +4,7 @@ Dataset loaders and evaluation helpers for MALT.
 Currently includes:
 - GSM8K loading and answer normalization utilities.
 - MATH loading and answer normalization utilities.
+- Somadhan loading and answer normalization utilities.
 """
 
 from .gsm8k import (
@@ -20,6 +21,13 @@ from .math import (
     normalize_math_answer,
     math_exact_match,
 )
+from .somadhan import (
+    SomadhanExample,
+    load_Somadhan_split,
+    extract_Somadhan_answer,
+    normalize_Somadhan_answer,
+    Somadhan_exact_match,
+)
 
 __all__ = [
     "Gsm8kExample",
@@ -32,6 +40,11 @@ __all__ = [
     "extract_math_answer",
     "normalize_math_answer",
     "math_exact_match",
+    "SomadhanExample",
+    "load_Somadhan_split",
+    "extract_Somadhan_answer",
+    "normalize_Somadhan_answer",
+    "Somadhan_exact_match",
 ]
 
 

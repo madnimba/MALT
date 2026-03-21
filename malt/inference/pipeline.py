@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Callable, List, Sequence, Union
 
 import torch
 from peft import PeftModel
@@ -14,13 +14,31 @@ from malt.models.prompts import (
     build_verifier_prompt,
     build_refiner_prompt,
 )
+from malt.data import SomadhanExample, extract_Somadhan_answer, normalize_Somadhan_answer
 
+
+# Union type accepted everywhere a question object is expected.
+AnyExample = Union[Gsm8kExample, SomadhanExample]
+
+
+def _get_answer_fns(
+    example: AnyExample,
+) -> tuple[Callable[[str], str], Callable[[str], str]]:
+    """
+    Return the (extract, normalize) function pair appropriate for the example type.
+    """
+    if isinstance(example, SomadhanExample):
+        return extract_Somadhan_answer, normalize_Somadhan_answer
+    return extract_gsm8k_answer, normalize_gsm8k_answer
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 @dataclass
 class InferenceConfig:
-    """
-    Configuration for GSM8K inference.
-    """
+    """Configuration for inference over any supported dataset."""
 
     max_new_tokens: int = 256
     temperature: float = 0.3
@@ -30,6 +48,10 @@ class InferenceConfig:
     # Number of independent trajectories per question for majority voting.
     num_samples: int = 3
 
+
+# ---------------------------------------------------------------------------
+# Low-level generation helper
+# ---------------------------------------------------------------------------
 
 def _generate_single(
     model: PeftModel,
@@ -61,28 +83,61 @@ def _generate_single(
         )
 
         gen_text = tokenizer.decode(
-            gen_ids[0][inputs["input_ids"].shape[1] :],
+            gen_ids[0][inputs["input_ids"].shape[1]:],
             skip_special_tokens=True,
         )
         return gen_text.strip()
 
 
-def run_single_agent_generator_gsm8k(
+# ---------------------------------------------------------------------------
+# Shared majority-vote helper
+# ---------------------------------------------------------------------------
+
+def _majority_vote(
+    answers: List[str],
+    extract_fn: Callable[[str], str],
+    normalize_fn: Callable[[str], str],
+) -> str:
+    """
+    Given a list of raw answer strings, return the raw answer whose normalized
+    form appears most often. Returns "" if the list is empty.
+    """
+    if not answers:
+        return ""
+
+    norm_counts: Counter = Counter(
+        normalize_fn(extract_fn(a)) for a in answers
+    )
+    best_norm, _ = norm_counts.most_common(1)[0]
+    for a in answers:
+        if normalize_fn(extract_fn(a)) == best_norm:
+            return a
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Single-agent inference
+# ---------------------------------------------------------------------------
+
+def run_single_agent_generator(
     model: PeftModel,
     tokenizer: PreTrainedTokenizerBase,
-    questions: Sequence[Gsm8kExample],
+    questions: Sequence[AnyExample],
     cfg: InferenceConfig,
 ) -> List[str]:
     """
     Single-agent baseline: use only the Generator-style prompt and model.
 
-    For each question, sample `cfg.num_samples` generator outputs and return
-    the majority-voted final answer (after extraction/normalization).
+    Accepts both Gsm8kExample and SomadhanExample questions. For each question,
+    sample cfg.num_samples generator outputs and return the majority-voted
+    final answer.
     """
     final_answers: List[str] = []
 
     for ex in questions:
+        extract_fn, normalize_fn = _get_answer_fns(ex)
         answers: List[str] = []
+
         for _ in range(cfg.num_samples):
             prompt = build_generator_prompt(ex.question)
             gen_text = _generate_single(
@@ -94,54 +149,50 @@ def run_single_agent_generator_gsm8k(
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
-            answers.append(extract_gsm8k_answer(gen_text))
+            answers.append(gen_text)
 
-        # Majority vote over normalized answers.
-        norm_counts: Counter = Counter(
-            normalize_gsm8k_answer(a) for a in answers
-        )
-        if not norm_counts:
-            final_answers.append("")
-            continue
-        best_norm, _ = norm_counts.most_common(1)[0]
-        # Return a representative raw answer that normalizes to best_norm.
-        for a in answers:
-            if normalize_gsm8k_answer(a) == best_norm:
-                final_answers.append(a)
-                break
+        final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
 
     return final_answers
 
 
-def run_multi_agent_malt_gsm8k(
+# Backwards-compatible alias for callers that used the GSM8K-specific name.
+run_single_agent_generator_gsm8k = run_single_agent_generator
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent MALT inference
+# ---------------------------------------------------------------------------
+
+def run_multi_agent_malt(
     generator_model: PeftModel,
     verifier_model: PeftModel,
     refiner_model: PeftModel,
     tokenizer: PreTrainedTokenizerBase,
-    questions: Sequence[Gsm8kExample],
+    questions: Sequence[AnyExample],
     cfg: InferenceConfig,
 ) -> List[str]:
     """
-    Multi-agent MALT-style inference on GSM8K.
+    Multi-agent MALT-style inference.
 
-    For each question:
-      - Sample a generator solution.
-      - Feed it to the verifier and sample a critique.
-      - Feed both into the refiner and sample a refined solution.
-      - Repeat this sequential pipeline `cfg.num_samples` times and majority
-        vote over the final refined answers.
+    Accepts both Gsm8kExample and SomadhanExample questions. For each question:
+      1. Sample a generator solution.
+      2. Feed it to the verifier and sample a critique.
+      3. Feed both into the refiner and sample a refined solution.
+      4. Repeat cfg.num_samples times and majority-vote over refined answers.
     """
     final_answers: List[str] = []
 
     for ex in questions:
+        extract_fn, normalize_fn = _get_answer_fns(ex)
         answers: List[str] = []
+
         for _ in range(cfg.num_samples):
             # Generator
-            g_prompt = build_generator_prompt(ex.question)
             g_text = _generate_single(
                 model=generator_model,
                 tokenizer=tokenizer,
-                prompt=g_prompt,
+                prompt=build_generator_prompt(ex.question),
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
@@ -149,11 +200,10 @@ def run_multi_agent_malt_gsm8k(
             )
 
             # Verifier
-            v_prompt = build_verifier_prompt(ex.question, g_text)
             v_text = _generate_single(
                 model=verifier_model,
                 tokenizer=tokenizer,
-                prompt=v_prompt,
+                prompt=build_verifier_prompt(ex.question, g_text),
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
@@ -161,30 +211,22 @@ def run_multi_agent_malt_gsm8k(
             )
 
             # Refiner
-            r_prompt = build_refiner_prompt(ex.question, g_text, v_text)
             r_text = _generate_single(
                 model=refiner_model,
                 tokenizer=tokenizer,
-                prompt=r_prompt,
+                prompt=build_refiner_prompt(ex.question, g_text, v_text),
                 max_new_tokens=cfg.max_new_tokens,
                 temperature=cfg.temperature,
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
 
-            answers.append(extract_gsm8k_answer(r_text))
+            answers.append(r_text)
 
-        norm_counts: Counter = Counter(
-            normalize_gsm8k_answer(a) for a in answers
-        )
-        if not norm_counts:
-            final_answers.append("")
-            continue
-        best_norm, _ = norm_counts.most_common(1)[0]
-        for a in answers:
-            if normalize_gsm8k_answer(a) == best_norm:
-                final_answers.append(a)
-                break
+        final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
 
     return final_answers
 
+
+# Backwards-compatible alias for callers that used the GSM8K-specific name.
+run_multi_agent_malt_gsm8k = run_multi_agent_malt

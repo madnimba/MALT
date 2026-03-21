@@ -1,19 +1,38 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Callable, List, Sequence, Union
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
-from malt.data import Gsm8kExample, extract_gsm8k_answer, normalize_gsm8k_answer
+from malt.data import (
+    Gsm8kExample,
+    extract_gsm8k_answer,
+    normalize_gsm8k_answer,
+    SomadhanExample,
+    extract_Somadhan_answer,
+    normalize_Somadhan_answer,
+)
+
+
+# Union type accepted everywhere a question object is expected.
+AnyExample = Union[Gsm8kExample, SomadhanExample]
+
+
+def _get_answer_fns(
+    example: AnyExample,
+) -> tuple[Callable[[str], str], Callable[[str], str]]:
+    """Return the (extract, normalize) pair appropriate for the example type."""
+    if isinstance(example, SomadhanExample):
+        return extract_Somadhan_answer, normalize_Somadhan_answer
+    return extract_gsm8k_answer, normalize_gsm8k_answer
 
 
 @dataclass
 class QwenBaselineConfig:
-    """
-    Configuration for Qwen base-model baselines.
-    """
+    """Configuration for Qwen base-model baselines."""
 
     # E.g. "Qwen/Qwen2.5-1.5B" or "Qwen/Qwen2.5-3B"
     model_name: str = "Qwen/Qwen2.5-1.5B"
@@ -24,15 +43,12 @@ class QwenBaselineConfig:
     top_p: float = 0.95
     top_k: int = 50
 
-    num_samples: int = 1  # usually 1 for a simple zero-shot baseline
+    # Usually 1 for a simple zero-shot baseline; raise for majority voting.
+    num_samples: int = 1
 
 
-def load_qwen_model_and_tokenizer(
-    cfg: QwenBaselineConfig,
-):
-    """
-    Load a Qwen base model and tokenizer for zero-shot baselines.
-    """
+def load_qwen_model_and_tokenizer(cfg: QwenBaselineConfig):
+    """Load a Qwen base model and tokenizer for zero-shot baselines."""
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         device_map=cfg.device_map,
@@ -80,26 +96,48 @@ def _generate_single(
             pad_token_id=tokenizer.pad_token_id,
         )
         gen_text = tokenizer.decode(
-            gen_ids[0][inputs["input_ids"].shape[1] :],
+            gen_ids[0][inputs["input_ids"].shape[1]:],
             skip_special_tokens=True,
         )
         return gen_text.strip()
 
 
-def run_qwen_zero_shot_gsm8k(
+def _majority_vote(
+    answers: List[str],
+    extract_fn: Callable[[str], str],
+    normalize_fn: Callable[[str], str],
+) -> str:
+    """Return the raw answer whose normalized form appears most often."""
+    if not answers:
+        return ""
+    norm_counts: Counter = Counter(
+        normalize_fn(extract_fn(a)) for a in answers
+    )
+    best_norm, _ = norm_counts.most_common(1)[0]
+    for a in answers:
+        if normalize_fn(extract_fn(a)) == best_norm:
+            return a
+    return ""
+
+
+def run_qwen_zero_shot(
     model,
     tokenizer: PreTrainedTokenizerBase,
-    questions: Sequence[Gsm8kExample],
+    questions: Sequence[AnyExample],
     cfg: QwenBaselineConfig,
 ) -> List[str]:
     """
-    Zero-shot Qwen baseline on GSM8K without any fine-tuning or multi-agent
-    structure.
+    Zero-shot Qwen baseline without any fine-tuning or multi-agent structure.
+
+    Accepts both Gsm8kExample and SomadhanExample questions. For each question,
+    generates cfg.num_samples completions and returns the majority-voted answer.
     """
     final_answers: List[str] = []
 
     for ex in questions:
+        extract_fn, normalize_fn = _get_answer_fns(ex)
         answers: List[str] = []
+
         for _ in range(cfg.num_samples):
             prompt = _simple_zero_shot_prompt(ex.question)
             gen_text = _generate_single(
@@ -111,21 +149,12 @@ def run_qwen_zero_shot_gsm8k(
                 top_p=cfg.top_p,
                 top_k=cfg.top_k,
             )
-            answers.append(extract_gsm8k_answer(gen_text))
+            answers.append(gen_text)
 
-        # Majority vote over normalized answers (even if num_samples == 1).
-        norm_counts = {}
-        for a in answers:
-            norm = normalize_gsm8k_answer(a)
-            norm_counts[norm] = norm_counts.get(norm, 0) + 1
-        if not norm_counts:
-            final_answers.append("")
-            continue
-        best_norm = max(norm_counts.items(), key=lambda kv: kv[1])[0]
-        for a in answers:
-            if normalize_gsm8k_answer(a) == best_norm:
-                final_answers.append(a)
-                break
+        final_answers.append(_majority_vote(answers, extract_fn, normalize_fn))
 
     return final_answers
 
+
+# Backwards-compatible alias for callers that used the GSM8K-specific name.
+run_qwen_zero_shot_gsm8k = run_qwen_zero_shot

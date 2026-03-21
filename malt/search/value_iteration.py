@@ -12,9 +12,13 @@ from malt.data import (
     extract_math_answer,
     math_exact_match,
 )
+from malt.data import (
+    extract_Somadhan_answer,
+    Somadhan_exact_match,
+)
 
 
-TaskName = Literal["gsm8k", "math"]
+TaskName = Literal["gsm8k", "math", "somadhan"]
 
 
 @dataclass
@@ -27,37 +31,25 @@ class ValueIterationConfig:
     threshold: float = 0.5
 
 
-def _reward_gsm8k(pred: str, target: str) -> int:
-    """
-    Binary reward for GSM8K: 1 if predicted answer equals ground truth,
-    0 otherwise.
-    """
-    # Ground truth answers in our dataset are already extracted; we still
-    # pass them through extract_gsm8k_answer to be robust.
-    correct = gsm8k_exact_match(pred, target)
-    return 1 if correct else 0
-
-
 def _extract_answer(task: TaskName, text: str) -> str:
-    """
-    Task-specific answer extraction function T(ro).
-
-    For now, only GSM8K is implemented. MATH extraction will be added in
-    the MATH-specific extension tasks.
-    """
+    """Task-specific answer extraction function T(ro)."""
     if task == "gsm8k":
         return extract_gsm8k_answer(text)
     if task == "math":
         return extract_math_answer(text)
+    if task == "somadhan":
+        return extract_Somadhan_answer(text)
     return text.strip()
 
 
 def _reward(task: TaskName, pred: str, target: str) -> int:
+    """Binary reward: 1 if pred matches target under the task's comparator."""
     if task == "gsm8k":
-        return _reward_gsm8k(pred, target)
+        return 1 if gsm8k_exact_match(pred, target) else 0
     if task == "math":
         return 1 if math_exact_match(pred, target) else 0
-    # Simple fallback for other tasks: string equality after stripping.
+    if task == "somadhan":
+        return 1 if Somadhan_exact_match(pred, target) else 0
     return 1 if pred.strip() == target.strip() else 0
 
 
@@ -161,4 +153,3 @@ def value_iteration_over_jsonl(
             f.write(json.dumps(traj, ensure_ascii=False) + "\n")
 
     return output_path
-

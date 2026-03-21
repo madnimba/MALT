@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
-from malt.data import gsm8k_exact_match, math_exact_match
+from malt.data import gsm8k_exact_match, math_exact_match, Somadhan_exact_match
 
 
 @dataclass
@@ -63,3 +63,23 @@ def evaluate_math_predictions(
     return EvalStats(total=total, correct=correct)
 
 
+def evaluate_somadhan_predictions(
+    predictions: Sequence[str],
+    targets: Sequence[str],
+) -> EvalStats:
+    """
+    Compute exact-match accuracy for Somadhan predictions.
+    """
+    if len(predictions) != len(targets):
+        raise ValueError(
+            f"Number of predictions ({len(predictions)}) does not match "
+            f"number of targets ({len(targets)})."
+        )
+
+    total = len(targets)
+    correct = 0
+    for pred, tgt in zip(predictions, targets):
+        if Somadhan_exact_match(pred, tgt):
+            correct += 1
+
+    return EvalStats(total=total, correct=correct)

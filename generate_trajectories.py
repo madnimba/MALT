@@ -1,5 +1,12 @@
 from pathlib import Path
-from malt.search import TreeSearchConfig, run_tree_search_for_gsm8k_split
+from malt.search import TreeSearchConfig, run_tree_search_for_somadhan
 
-cfg = TreeSearchConfig(branching_factor=3, output_path=Path("data/gsm8k_trajectories.jsonl"))
-run_tree_search_for_gsm8k_split("train", cfg)
+dataset_csv_path=Path("data/SOMADHAN.csv")
+trajectory_output_path = Path("data/somadhan_trajectories.jsonl")
+
+cfg = TreeSearchConfig(branching_factor=3, 
+                       output_path=trajectory_output_path,
+                       use_torch_compile=False)
+
+run_tree_search_for_somadhan(csv_path=dataset_csv_path, 
+                             cfg=cfg)
